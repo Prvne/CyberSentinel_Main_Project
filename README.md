@@ -1,11 +1,5 @@
 # CyberSentinelAI — Phase 1 Extended
 
-This extended scaffold includes:
-
-- Backend with /run-simulation background runner and /alerts/latest retrieval
-- React (Vite) dashboard to trigger simulation and view alerts
-- Integration test (pytest) that can run an end-to-end smoke test (requires Docker)
-
 Quick start:
 
 1. Ensure Docker and Docker Compose are installed.
