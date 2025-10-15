@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+odoorpc
+motor
+pymongo
+pydantic
+scikit-learn
+pandas
+requests

@@ -1,0 +1,54 @@
+services:
+  db:
+    image: postgres:14
+    environment:
+      POSTGRES_USER: odoo
+      POSTGRES_PASSWORD: odoo
+    volumes:
+      - db-data:/var/lib/postgresql/data
+  odoo:
+    image: odoo:16
+    depends_on:
+      - db
+    ports:
+      - "8069:8069"
+    environment:
+      HOST: db
+      USER: odoo
+      PASSWORD: odoo
+      ADMIN_PASSWORD: admin
+  mongo:
+    image: mongo:6
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+  backend:
+    build: ./app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./app:/app
+    ports:
+      - "8000:8000"
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+      ODOO_HOST: odoo
+      ODOO_PORT: "8069"
+      ODOO_USER: ${ODOO_USER}
+      ODOO_PASSWORD: ${ODOO_PASSWORD}
+    depends_on:
+      - odoo
+      - mongo
+  dashboard:
+    image: node:18
+    working_dir: /dashboard
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 3000"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./dashboard:/dashboard
+    depends_on:
+      - backend
+volumes:
+  db-data:
+  mongo-data:

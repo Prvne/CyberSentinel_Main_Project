@@ -1,0 +1,26 @@
+# installers and binaries
+*.exe
+*.msi
+*.iso
+*.zip
+
+# Python caches and envs
+__pycache__/
+.pytest_cache/
+.venv/
+.env
+
+# builds/artifacts
+dist/
+build/
+*.log
+
+# OS/editor
+.DS_Store
+Thumbs.db
+
+# dependencies
+node_modules/
+
+# tests cache (explicit)
+tests/__pycache__/
