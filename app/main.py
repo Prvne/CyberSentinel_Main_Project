@@ -3,6 +3,7 @@ import time
 from collections import deque, defaultdict
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Header, Depends
 from pydantic import BaseModel
+from enum import Enum
 import os
 from datetime import datetime, timedelta
 from bson import ObjectId
@@ -10,7 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from odoo_connector import OdooConnector
 from logs import LogIngest, LogEntry
 from sim_runner import run_simulation_async
+from detections import DetectionService
 from anomaly import AnomalyService
+from rl_agent import AnomalyRLAgent
 import logging
 from urllib.parse import urlparse
 app = FastAPI(title="CyberSentinelAI API - Phase1 Extended")
@@ -24,6 +27,8 @@ app.add_middleware(
 odoo = OdooConnector(host=os.getenv("ODOO_HOST", "localhost"), port=int(os.getenv("ODOO_PORT", "8069")))
 log_ingest = LogIngest()
 anomaly_service = AnomalyService()
+detect_service = DetectionService()
+anomaly_rl = AnomalyRLAgent()
 logger = logging.getLogger("cybersentinel")
 logging.basicConfig(level=logging.INFO)
 
@@ -36,6 +41,21 @@ _rate_buckets = defaultdict(lambda: deque())
 async def on_startup():
     # Ensure Mongo indexes exist for performant queries
     await log_ingest.ensure_indexes()
+    # Schedule RL training if configured
+    try:
+        interval_min = float(os.getenv('ANOMALY_RL_INTERVAL_MINUTES', '0'))
+    except Exception:
+        interval_min = 0.0
+    if interval_min and interval_min > 0:
+        async def _rl_loop():
+            while True:
+                try:
+                    await anomaly_rl.train_step(window_minutes=int(max(5, interval_min)))
+                except Exception as e:
+                    logger.warning({"event":"anomaly_rl_error","error":str(e)})
+                # sleep interval
+                await asyncio.sleep(int(interval_min * 60))
+        asyncio.create_task(_rl_loop())
 
 @app.get('/health')
 def health():
@@ -74,6 +94,27 @@ def list_users(db: str = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+class SimType(str, Enum):
+    brute_force = "brute_force"
+    port_scan = "port_scan"
+    sql_injection = "sql_injection"
+    phishing = "phishing"
+    ddos = "ddos"
+    xss_probe = "xss_probe"
+    data_exfiltration = "data_exfiltration"
+    ransomware = "ransomware"
+    lateral_movement = "lateral_movement"
+    malware_beacon = "malware_beacon"
+    password_spray = "password_spray"
+    directory_traversal = "directory_traversal"
+    csrf_probe = "csrf_probe"
+    command_injection = "command_injection"
+    file_upload_probe = "file_upload_probe"
+    ssrf_probe = "ssrf_probe"
+    jwt_tamper = "jwt_tamper"
+    credential_stuffing = "credential_stuffing"
+    web_cache_deception = "web_cache_deception"
+
 class SimRequest(BaseModel):
     target: str
     db: str
@@ -81,6 +122,16 @@ class SimRequest(BaseModel):
     wordlist: list[str] = []
     delay: float = 1.0
     sandbox: bool = True
+    sim_type: SimType = SimType.brute_force  # validated enum of supported simulations
+    attempts: int = 5  # used by some sim types when no explicit list is provided
+    scan_ports: list[int] = []  # for port_scan
+    payloads: list[str] = []  # for sql_injection or other payload-driven sims
+    hosts: list[str] = []  # for lateral_movement
+    data_size_kb: int = 100  # for data_exfiltration
+    chunk_size_kb: int = 10  # for data_exfiltration
+    users: list[str] = []  # for password_spray
+    password: str | None = None  # for password_spray
+    paths: list[str] = []  # for directory_traversal
 
 @app.post('/run-simulation', dependencies=[Depends(require_api_key)])
 async def run_sim(sim: SimRequest, background_tasks: BackgroundTasks, request: Request):
@@ -101,6 +152,20 @@ async def run_sim(sim: SimRequest, background_tasks: BackgroundTasks, request: R
         raise HTTPException(status_code=400, detail="delay must be between 0.05 and 5.0 seconds")
     if not sim.db:
         raise HTTPException(status_code=400, detail="db is required")
+    if sim.attempts < 1 or sim.attempts > 100:
+        raise HTTPException(status_code=400, detail="attempts must be between 1 and 100")
+    if sim.scan_ports and len(sim.scan_ports) > 100:
+        raise HTTPException(status_code=400, detail="too many ports (max 100)")
+    if sim.hosts and len(sim.hosts) > 100:
+        raise HTTPException(status_code=400, detail="too many hosts (max 100)")
+    if sim.data_size_kb < 1 or sim.data_size_kb > 100000:
+        raise HTTPException(status_code=400, detail="data_size_kb must be between 1 and 100000")
+    if sim.chunk_size_kb < 1 or sim.chunk_size_kb > sim.data_size_kb:
+        raise HTTPException(status_code=400, detail="chunk_size_kb must be between 1 and data_size_kb")
+    if sim.users and len(sim.users) > 500:
+        raise HTTPException(status_code=400, detail="too many users (max 500)")
+    if sim.paths and len(sim.paths) > 200:
+        raise HTTPException(status_code=400, detail="too many paths (max 200)")
     client_ip = request.client.host if request.client else "unknown"
     now = time.time()
     bucket = _rate_buckets[client_ip]
@@ -120,9 +185,71 @@ async def latest_alerts(limit: int = 20):
     return {'count': len(docs), 'results': docs}
 
 @app.get('/anomalies/latest')
-async def anomalies_latest(limit: int = 20):
+async def anomalies_latest(limit: int = 20, use_rl_threshold: bool = False, min_score: float | None = None):
     result = await anomaly_service.latest_anomalies(limit)
+    # Optionally filter by RL-selected threshold or explicit min_score
+    rows = result.get('results', [])
+    thr = None
+    if use_rl_threshold:
+        try:
+            thr = await anomaly_rl.get_threshold()
+        except Exception:
+            thr = None
+    if min_score is not None:
+        thr = float(min_score)
+    if thr is not None:
+        rows = [r for r in rows if float(r.get('anomaly_score', 0.0)) >= float(thr)]
+    return { 'count': len(rows), 'results': rows, 'threshold_used': thr }
+
+@app.get('/anomaly-rl/status')
+async def anomaly_rl_status():
+    return await anomaly_rl.status()
+
+@app.post('/anomaly-rl/train-step')
+async def anomaly_rl_train(window_minutes: int = 30):
+    out = await anomaly_rl.train_step(window_minutes=window_minutes)
+    return out
+
+@app.get('/alerts/derived')
+async def derived_alerts(limit: int = 50, window_minutes: int = 30, severity: str | None = None, type_contains: str | None = None, skip: int = 0):
+    result = await detect_service.derived_alerts(limit=limit, window_minutes=window_minutes, severity=severity, type_contains=type_contains, skip=skip)
     return result
+
+@app.get('/alerts/related')
+async def related_events(alert_type: str, limit: int = 20, window_minutes: int = 60):
+    # Map derived alert types to relevant raw event_types
+    mapping = {
+        'brute_force_detected': ['login_attempt','brute_force_attempt'],
+        'port_scan_detected': ['port_scan_probe'],
+        'sql_injection_detected': ['sql_injection_attempt'],
+        'xss_detected': ['xss_probe'],
+        'ddos_spike_detected': ['ddos_traffic'],
+        'phishing_campaign_detected': ['phishing_email'],
+        'ransomware_activity_detected': ['ransomware_encrypt'],
+        'data_exfiltration_detected': ['data_exfiltration'],
+        'lateral_movement_detected': ['lateral_movement_attempt'],
+        'c2_beaconing_detected': ['malware_beacon'],
+        'password_spray_detected': ['password_spray_attempt'],
+        'dir_traversal_detected': ['dir_traversal_probe'],
+        'csrf_detected': ['csrf_probe'],
+        'cmd_injection_detected': ['cmd_injection_probe'],
+        'file_upload_abuse_detected': ['file_upload_probe'],
+        'ssrf_detected': ['ssrf_probe'],
+        'jwt_tamper_detected': ['jwt_tamper_probe'],
+        'web_cache_deception_detected': ['web_cache_deception_probe'],
+        'kill_chain_progression': ['password_spray_attempt','lateral_movement_attempt']
+    }
+    event_types = mapping.get(alert_type, [])
+    cutoff = datetime.utcnow() - timedelta(minutes=window_minutes)
+    q = {'ts': {'$gte': cutoff}}
+    if event_types:
+        q['event_type'] = {'$in': event_types}
+    cursor = log_ingest.db.logs.find(q).sort([('_id', -1)]).limit(limit)
+    out = []
+    async for d in cursor:
+        d['_id'] = str(d['_id'])
+        out.append(d)
+    return {'count': len(out), 'results': out}
 
 @app.get('/metrics')
 async def metrics():
