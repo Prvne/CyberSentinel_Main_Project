@@ -7,3 +7,6 @@ pydantic
 scikit-learn
 pandas
 requests
+psutil
+joblib
+numpy

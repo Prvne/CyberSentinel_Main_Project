@@ -1,0 +1,163 @@
+version: '3.8'
+
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:6
+    container_name: cybersentinel-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - cybersentinel-network
+
+  # Main Backend API
+  backend:
+    build: ./app
+    container_name: cybersentinel-backend
+    ports:
+      - "8000:8000"
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+      ODOO_HOST: odoo
+      ODOO_PORT: 8069
+      API_KEY: ${API_KEY:-}
+      ML_MODE: ${ML_MODE:-production}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - cybersentinel-network
+    volumes:
+      - ./app:/app
+      - ./models:/app/models
+      - ./logs:/app/logs
+
+  # Odoo ERP
+  odoo:
+    image: odoo:16
+    container_name: cybersentinel-odoo
+    ports:
+      - "8069:8069"
+    environment:
+      HOST: db
+      PORT: 5432
+      USER: odoo
+      PASSWORD: odoo
+      ADMIN_PASSWORD: admin
+    depends_on:
+      - db
+    networks:
+      - cybersentinel-network
+    volumes:
+      - odoo-data:/var/lib/odoo
+
+  # PostgreSQL Database for Odoo
+  db:
+    image: postgres:14
+    container_name: cybersentinel-db
+    environment:
+      POSTGRES_USER: odoo
+      POSTGRES_PASSWORD: odoo
+      POSTGRES_DB: odoo
+    volumes:
+      - odoo-data:/var/lib/postgresql/data
+    networks:
+      - cybersentinel-network
+
+  # Redis for Caching and Session Management
+  redis:
+    image: redis:7-alpine
+    container_name: cybersentinel-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - cybersentinel-network
+
+  # ML Defending Agent - Separate Container
+  ml-defender:
+    build:
+      context: .
+      dockerfile: Dockerfile.ml-defender
+    container_name: cybersentinel-ml-defender
+    ports:
+      - "8001:8001"
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+      REDIS_URL: redis://redis:6379
+      MODEL_PATH: /app/models
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PREDICTION_INTERVAL: ${PREDICTION_INTERVAL:-30}
+      ANOMALY_THRESHOLD: ${ANOMALY_THRESHOLD:-0.1}
+      MAX_USERS: ${MAX_USERS:-1000}
+      TRAINING_INTERVAL: ${TRAINING_INTERVAL:-3600}
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - cybersentinel-network
+    volumes:
+      - ./models:/app/models:ro
+      - ./ml-logs:/app/logs
+      - ./ml-data:/app/ml-data
+    command: >
+      sh -c "
+        echo '🤖 Starting ML Defending Agent...'
+        python -m app.ml_init &&
+        echo '🚀 ML Defending Agent is running on port 8001' &&
+        echo '📊 API available at http://localhost:8001' &&
+        echo '🔍 Monitoring MongoDB: mongodb://mongo:27017' &&
+        echo '📈 Training interval: ${TRAINING_INTERVAL:-3600}s' &&
+        echo '⚡ Anomaly threshold: ${ANOMALY_THRESHOLD:-0.1}' &&
+        echo '👥 Max users monitored: ${MAX_USERS:-1000}'
+        python -m uvicorn app.ml_service:app --host 0.0.0.0 --port 8001
+      "
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Main Dashboard (Updated to connect to ML services)
+  dashboard:
+    build: ./dashboard
+    container_name: cybersentinel-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:8000
+      REACT_APP_ML_API_URL: http://localhost:8001
+      REACT_APP_WS_URL: ws://localhost:8001/ws
+      NODE_ENV: production
+    depends_on:
+      - backend
+      - ml-defender
+    networks:
+      - cybersentinel-network
+    volumes:
+      - ./dashboard/src:/app/src
+      - ./dashboard/public:/app/public
+
+volumes:
+  # Persistent data storage
+  mongo-data:
+    driver: local
+  odoo-data:
+    driver: local
+  models:
+    driver: local
+  ml-logs:
+    driver: local
+  ml-data:
+    driver: local
+
+networks:
+  cybersentinel-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+        - gateway: 172.20.0.1

@@ -14,6 +14,7 @@ services:
       - "8069:8069"
     environment:
       HOST: db
+      PORT: 5432
       USER: odoo
       PASSWORD: odoo
       ADMIN_PASSWORD: admin
@@ -39,16 +40,36 @@ services:
     depends_on:
       - odoo
       - mongo
+  ml-defender:
+    build:
+      context: .
+      dockerfile: Dockerfile.ml-defender
+    command: python -m uvicorn app.ml_service:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+      MODEL_PATH: /app/models
+      LOG_LEVEL: INFO
+    volumes:
+      - ./models:/app/models
+      - ./app:/app/app
+    depends_on:
+      - mongo
   dashboard:
     image: node:18
     working_dir: /dashboard
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 3000"
     ports:
       - "3000:3000"
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+      CHOKIDAR_INTERVAL: "250"
     volumes:
       - ./dashboard:/dashboard
     depends_on:
       - backend
+      - ml-defender
 volumes:
   db-data:
   mongo-data:

@@ -6,9 +6,11 @@
 
 # Python caches and envs
 __pycache__/
+*.pyc
 .pytest_cache/
 .venv/
 .env
+.env.*
 
 # builds/artifacts
 dist/
@@ -21,6 +23,11 @@ Thumbs.db
 
 # dependencies
 node_modules/
+
+# local scratch files (not part of product)
+ddos_sim.json
+test_sim*.json
+login_*.html
 
 # tests cache (explicit)
 tests/__pycache__/

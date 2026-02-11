@@ -2,7 +2,9 @@ import React, { useEffect, useState } from 'react'
 
 export default function App() {
   const API_BASE = 'http://localhost:8000'
+  const ML_BASE = 'http://localhost:8001'
   const [health, setHealth] = useState('unknown')
+  const [mlHealth, setMlHealth] = useState('unknown')
   const [running, setRunning] = useState(false)
   const [rawAlerts, setRawAlerts] = useState([])
   const [derived, setDerived] = useState([])
@@ -10,6 +12,10 @@ export default function App() {
   const [filterType, setFilterType] = useState('')
   const [expanded, setExpanded] = useState({})
   const [related, setRelated] = useState({})
+  const [mlPredict, setMlPredict] = useState(null)
+  const [mlAnomalies, setMlAnomalies] = useState(null)
+  const [mlRecs, setMlRecs] = useState(null)
+  const [mlBusy, setMlBusy] = useState(false)
 
   // simulation form state
   const [simType, setSimType] = useState('brute_force')
@@ -27,9 +33,17 @@ export default function App() {
   const [dataSize, setDataSize] = useState(120)
   const [chunkSize, setChunkSize] = useState(40)
   const [paths, setPaths] = useState('../../etc/passwd,..%2f..%2f..%2fwindows/win.ini')
+  const [rlSteps, setRlSteps] = useState(50)
+  const [rlEpsilon, setRlEpsilon] = useState(0.25)
+  const [rlAlpha, setRlAlpha] = useState(0.25)
+  const [rlGamma, setRlGamma] = useState(0.9)
+  const [emitRecs, setEmitRecs] = useState(true)
 
   useEffect(() => {
     fetch(`${API_BASE}/health`).then(r => r.json()).then(d => setHealth(d.status)).catch(() => setHealth('down'))
+    fetch(`${ML_BASE}/health`).then(r => r.json()).then(d => setMlHealth(d.status)).catch(() => setMlHealth('down'))
+    // Load derived alerts on component mount
+    loadDerived()
   }, [])
 
   function buildPayload() {
@@ -37,6 +51,8 @@ export default function App() {
     switch (simType) {
       case 'brute_force':
         return { ...base, wordlist: wordlist.split(',').map(s => s.trim()).filter(Boolean) }
+      case 'adaptive_rl':
+        return { ...base, steps: Number(rlSteps), epsilon: Number(rlEpsilon), alpha: Number(rlAlpha), gamma: Number(rlGamma), emit_recommendations: !!emitRecs }
       case 'port_scan':
         return { ...base, scan_ports: scanPorts.split(',').map(s => Number(s.trim())).filter(n => !Number.isNaN(n)), attempts: Number(attempts) }
       case 'sql_injection':
@@ -82,17 +98,52 @@ export default function App() {
     const r = await fetch(`${API_BASE}/alerts/latest`); const j = await r.json(); setRawAlerts(j.results || [])
   }
   async function loadDerived() {
-    const params = new URLSearchParams()
-    params.set('window_minutes', '120')
-    if (filterSeverity) params.set('severity', filterSeverity)
-    if (filterType) params.set('type_contains', filterType)
-    const r = await fetch(`${API_BASE}/alerts/derived?${params.toString()}`); const j = await r.json(); setDerived(j.results || [])
+    try {
+      const params = new URLSearchParams()
+      // Increased time window to show more alerts (24 hours)
+      params.set('window_minutes', '1440')
+      if (filterSeverity) params.set('severity', filterSeverity)
+      if (filterType) params.set('type_contains', filterType)
+      const r = await fetch(`${API_BASE}/alerts/derived?${params.toString()}`); 
+      const j = await r.json(); 
+      setDerived(j.results || [])
+      console.log('Loaded derived alerts:', j.results || [])
+    } catch (error) {
+      console.error('Error loading derived alerts:', error)
+      setDerived([])
+    }
   }
 
   async function loadRelated(alertType) {
     const r = await fetch(`${API_BASE}/alerts/related?alert_type=${encodeURIComponent(alertType)}&limit=10&window_minutes=120`)
     const j = await r.json()
     setRelated(prev => ({ ...prev, [alertType]: j.results || [] }))
+  }
+
+  async function mlFetchJson(path, setter) {
+    setMlBusy(true)
+    try {
+      const r = await fetch(`${ML_BASE}${path}`)
+      const j = await r.json()
+      setter(j)
+    } catch (e) {
+      setter({ status: 'error', error: String(e) })
+    } finally {
+      setMlBusy(false)
+    }
+  }
+
+  async function mlRetrain() {
+    setMlBusy(true)
+    try {
+      const r = await fetch(`${ML_BASE}/api/ml/retrain`, { method: 'POST' })
+      const j = await r.json()
+      setMlRecs(j)
+    } catch (e) {
+      setMlRecs({ status: 'error', error: String(e) })
+    } finally {
+      setMlBusy(false)
+    }
   }
 
   function toggleExpand(alert) {
@@ -121,8 +172,9 @@ export default function App() {
 
   return (
     <div style={{ fontFamily: 'system-ui, Arial, sans-serif', padding: 20, maxWidth: 1200, margin: '0 auto', background: '#f9fafb' }}>
-      <h1 style={{ marginBottom: 4 }}>CyberSentinelAI — Dashboard</h1>
+      <h1 style={{ marginBottom: 4 }}>CyberShieldERP</h1>
       <p>Backend health: <strong>{health}</strong></p>
+      <p>ML defender health: <strong>{mlHealth}</strong></p>
 
       <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
         <div style={col}>
@@ -133,6 +185,7 @@ export default function App() {
                 <label style={label}>sim_type</label>
                 <select value={simType} onChange={e => setSimType(e.target.value)} style={{ ...input, height: 34 }}>
                   <option value="brute_force">brute_force</option>
+                  <option value="adaptive_rl">adaptive_rl (reinforcement learning)</option>
                   <option value="port_scan">port_scan</option>
                   <option value="sql_injection">sql_injection</option>
                   <option value="xss_probe">xss_probe</option>
@@ -179,6 +232,34 @@ export default function App() {
               <div style={{ marginTop: 12 }}>
                 <label style={label}>wordlist (comma separated)</label>
                 <input value={wordlist} onChange={e => setWordlist(e.target.value)} style={input} />
+              </div>
+            )}
+
+            {simType === 'adaptive_rl' && (
+              <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div>
+                  <label style={label}>steps</label>
+                  <input value={rlSteps} onChange={e => setRlSteps(e.target.value)} style={input} />
+                </div>
+                <div>
+                  <label style={label}>epsilon</label>
+                  <input value={rlEpsilon} onChange={e => setRlEpsilon(e.target.value)} style={input} />
+                </div>
+                <div>
+                  <label style={label}>alpha</label>
+                  <input value={rlAlpha} onChange={e => setRlAlpha(e.target.value)} style={input} />
+                </div>
+                <div>
+                  <label style={label}>gamma</label>
+                  <input value={rlGamma} onChange={e => setRlGamma(e.target.value)} style={input} />
+                </div>
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <label style={label}>emit_recommendations</label>
+                  <select value={emitRecs ? 'true' : 'false'} onChange={e => setEmitRecs(e.target.value === 'true')} style={{ ...input, height: 34 }}>
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                </div>
               </div>
             )}
             {simType === 'port_scan' && (
@@ -251,6 +332,31 @@ export default function App() {
         </div>
 
         <div style={{ ...col, minWidth: 360 }}>
+          <div style={card}>
+            <h3>Defending Module (ML Defender)</h3>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button disabled={mlBusy} onClick={() => { fetch(`${ML_BASE}/health`).then(r => r.json()).then(d => setMlHealth(d.status)).catch(() => setMlHealth('down')) }} style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #e5e7eb' }}>Refresh Health</button>
+              <button disabled={mlBusy} onClick={() => mlFetchJson('/api/ml/predict', setMlPredict)} style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #e5e7eb' }}>Predict</button>
+              <button disabled={mlBusy} onClick={() => mlFetchJson('/api/ml/anomalies', setMlAnomalies)} style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #e5e7eb' }}>Anomalies</button>
+              <button disabled={mlBusy} onClick={() => mlFetchJson('/api/ml/recommendations', setMlRecs)} style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #e5e7eb' }}>Recommendations</button>
+              <button disabled={mlBusy} onClick={mlRetrain} style={{ padding: '6px 10px', borderRadius: 8, border: '1px solid #111827', background: '#111827', color: '#fff' }}>Re-train</button>
+            </div>
+            <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: '1fr', gap: 10 }}>
+              <div>
+                <div style={{ fontSize: 12, color: '#374151', marginBottom: 4 }}>Predict</div>
+                <pre style={{ margin: 0, padding: 10, background: '#f3f4f6', borderRadius: 8, maxHeight: 140, overflow: 'auto', fontSize: 12 }}>{mlPredict ? JSON.stringify(mlPredict, null, 2) : '—'}</pre>
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: '#374151', marginBottom: 4 }}>Anomalies</div>
+                <pre style={{ margin: 0, padding: 10, background: '#f3f4f6', borderRadius: 8, maxHeight: 140, overflow: 'auto', fontSize: 12 }}>{mlAnomalies ? JSON.stringify(mlAnomalies, null, 2) : '—'}</pre>
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: '#374151', marginBottom: 4 }}>Recommendations / Retrain status</div>
+                <pre style={{ margin: 0, padding: 10, background: '#f3f4f6', borderRadius: 8, maxHeight: 140, overflow: 'auto', fontSize: 12 }}>{mlRecs ? JSON.stringify(mlRecs, null, 2) : '—'}</pre>
+              </div>
+            </div>
+          </div>
+
           <div style={card}>
             <h3>Derived Alerts</h3>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
